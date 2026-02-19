@@ -5,12 +5,14 @@ function buildAdjacencyList(transactions: Transaction[]): Map<string, string[]> 
   const adj = new Map<string, string[]>();
   for (const t of transactions) {
     if (!adj.has(t.sender_id)) adj.set(t.sender_id, []);
-    adj.get(t.sender_id)!.push(t.receiver_id);
+    if (!adj.get(t.sender_id)!.includes(t.receiver_id)) {
+      adj.get(t.sender_id)!.push(t.receiver_id);
+    }
   }
   return adj;
 }
 
-// Detect cycles of length 3-5 using DFS
+// Detect cycles of length 3-5 using DFS with early pruning
 function detectCycles(adj: Map<string, string[]>, maxLength: number = 5): string[][] {
   const cycles: string[][] = [];
   const seen = new Set<string>();
@@ -52,9 +54,10 @@ function detectSmurfing(transactions: Transaction[]): Map<string, string[]> {
 
   for (const [receiver, txs] of receiverMap) {
     for (let i = 0; i < txs.length; i++) {
+      const windowStart = txs[i].timestamp.getTime();
       const window = txs.filter(
-        (t) => t.timestamp.getTime() >= txs[i].timestamp.getTime() &&
-               t.timestamp.getTime() <= txs[i].timestamp.getTime() + WINDOW_MS
+        (t) => t.timestamp.getTime() >= windowStart &&
+               t.timestamp.getTime() <= windowStart + WINDOW_MS
       );
       const uniqueSenders = new Set(window.map((t) => t.sender_id));
       if (uniqueSenders.size >= 3) {
@@ -79,9 +82,10 @@ function detectSmurfing(transactions: Transaction[]): Map<string, string[]> {
 
   for (const [sender, txs] of senderMap) {
     for (let i = 0; i < txs.length; i++) {
+      const windowStart = txs[i].timestamp.getTime();
       const window = txs.filter(
-        (t) => t.timestamp.getTime() >= txs[i].timestamp.getTime() &&
-               t.timestamp.getTime() <= txs[i].timestamp.getTime() + WINDOW_MS
+        (t) => t.timestamp.getTime() >= windowStart &&
+               t.timestamp.getTime() <= windowStart + WINDOW_MS
       );
       const uniqueReceivers = new Set(window.map((t) => t.receiver_id));
       if (uniqueReceivers.size >= 3) {
@@ -109,7 +113,6 @@ function detectLayeredShells(
     while (stack.length > 0) {
       const { node, path } = stack.pop()!;
       if (path.length >= 4) {
-        // Check intermediaries (exclude start and end)
         const intermediaries = path.slice(1, -1);
         const allLowActivity = intermediaries.every(
           (n) => (transactionCounts.get(n) || 0) <= 3
@@ -135,7 +138,154 @@ function detectLayeredShells(
   return chains;
 }
 
-// Calculate suspicion score for an account
+// NEW: Detect high-velocity transactions (rapid-fire sends/receives)
+function detectHighVelocity(transactions: Transaction[]): Map<string, string[]> {
+  const suspicious = new Map<string, string[]>();
+  const RAPID_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
+  const MIN_RAPID_TXS = 4;
+
+  const sorted = [...transactions].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+  // Group by sender
+  const senderTxs = new Map<string, Transaction[]>();
+  for (const t of sorted) {
+    if (!senderTxs.has(t.sender_id)) senderTxs.set(t.sender_id, []);
+    senderTxs.get(t.sender_id)!.push(t);
+  }
+
+  for (const [sender, txs] of senderTxs) {
+    for (let i = 0; i < txs.length; i++) {
+      const windowStart = txs[i].timestamp.getTime();
+      const rapid = txs.filter(
+        (t) => t.timestamp.getTime() >= windowStart &&
+               t.timestamp.getTime() <= windowStart + RAPID_WINDOW_MS
+      );
+      if (rapid.length >= MIN_RAPID_TXS) {
+        const pats = suspicious.get(sender) || [];
+        if (!pats.includes("high_velocity")) pats.push("high_velocity");
+        suspicious.set(sender, pats);
+        break;
+      }
+    }
+  }
+
+  return suspicious;
+}
+
+// NEW: Detect round-amount structuring (amounts just below reporting thresholds)
+function detectStructuring(transactions: Transaction[]): Map<string, string[]> {
+  const suspicious = new Map<string, string[]>();
+  const THRESHOLDS = [10000, 5000, 3000]; // Common reporting thresholds
+  const MARGIN = 500; // Within $500 below threshold
+
+  const senderTxs = new Map<string, Transaction[]>();
+  for (const t of transactions) {
+    if (!senderTxs.has(t.sender_id)) senderTxs.set(t.sender_id, []);
+    senderTxs.get(t.sender_id)!.push(t);
+  }
+
+  for (const [sender, txs] of senderTxs) {
+    let structuringCount = 0;
+    for (const t of txs) {
+      for (const threshold of THRESHOLDS) {
+        if (t.amount >= threshold - MARGIN && t.amount < threshold) {
+          structuringCount++;
+        }
+      }
+    }
+    // If 3+ transactions are just below thresholds, flag
+    if (structuringCount >= 3) {
+      const pats = suspicious.get(sender) || [];
+      if (!pats.includes("structuring")) pats.push("structuring");
+      suspicious.set(sender, pats);
+    }
+  }
+
+  return suspicious;
+}
+
+// NEW: Detect round-trip flows (A→B→A patterns with similar amounts)
+function detectRoundTrips(transactions: Transaction[]): Map<string, string[]> {
+  const suspicious = new Map<string, string[]>();
+  const TOLERANCE = 0.15; // 15% amount tolerance
+  const WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+  // Build pair map
+  const pairMap = new Map<string, Transaction[]>();
+  for (const t of transactions) {
+    const key = `${t.sender_id}->${t.receiver_id}`;
+    if (!pairMap.has(key)) pairMap.set(key, []);
+    pairMap.get(key)!.push(t);
+  }
+
+  for (const [key, txs] of pairMap) {
+    const [a, b] = key.split("->");
+    const reverseKey = `${b}->${a}`;
+    const reverseTxs = pairMap.get(reverseKey);
+    if (!reverseTxs) continue;
+
+    for (const t1 of txs) {
+      for (const t2 of reverseTxs) {
+        const timeDiff = Math.abs(t1.timestamp.getTime() - t2.timestamp.getTime());
+        const amountRatio = Math.min(t1.amount, t2.amount) / Math.max(t1.amount, t2.amount);
+        if (timeDiff <= WINDOW_MS && amountRatio >= 1 - TOLERANCE) {
+          for (const acc of [a, b]) {
+            const pats = suspicious.get(acc) || [];
+            if (!pats.includes("round_trip")) pats.push("round_trip");
+            suspicious.set(acc, pats);
+          }
+        }
+      }
+    }
+  }
+
+  return suspicious;
+}
+
+// NEW: Detect dormant account activation (accounts with sudden activity bursts)
+function detectDormantActivation(transactions: Transaction[]): Map<string, string[]> {
+  const suspicious = new Map<string, string[]>();
+  const sorted = [...transactions].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+  
+  if (sorted.length === 0) return suspicious;
+
+  const totalSpan = sorted[sorted.length - 1].timestamp.getTime() - sorted[0].timestamp.getTime();
+  if (totalSpan < 7 * 24 * 60 * 60 * 1000) return suspicious; // Need at least 7 days of data
+
+  const accountTxs = new Map<string, Transaction[]>();
+  for (const t of sorted) {
+    for (const id of [t.sender_id, t.receiver_id]) {
+      if (!accountTxs.has(id)) accountTxs.set(id, []);
+      accountTxs.get(id)!.push(t);
+    }
+  }
+
+  const BURST_WINDOW = 48 * 60 * 60 * 1000; // 48 hours
+
+  for (const [acc, txs] of accountTxs) {
+    if (txs.length < 4) continue;
+    const accSorted = txs.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    const accSpan = accSorted[accSorted.length - 1].timestamp.getTime() - accSorted[0].timestamp.getTime();
+    
+    // Check if most transactions happen in a short burst relative to account's timeline
+    for (let i = 0; i < accSorted.length; i++) {
+      const burstTxs = accSorted.filter(
+        (t) => t.timestamp.getTime() >= accSorted[i].timestamp.getTime() &&
+               t.timestamp.getTime() <= accSorted[i].timestamp.getTime() + BURST_WINDOW
+      );
+      if (burstTxs.length >= Math.ceil(accSorted.length * 0.7) && accSpan > BURST_WINDOW * 3) {
+        const pats = suspicious.get(acc) || [];
+        if (!pats.includes("dormant_activation")) pats.push("dormant_activation");
+        suspicious.set(acc, pats);
+        break;
+      }
+    }
+  }
+
+  return suspicious;
+}
+
+// Calculate suspicion score for an account - ENHANCED
 function calcSuspicionScore(
   accountId: string,
   patterns: string[],
@@ -146,7 +296,7 @@ function calcSuspicionScore(
 ): number {
   let score = 0;
   
-  // Pattern-based scoring
+  // Pattern-based scoring (refined weights)
   if (patterns.includes("cycle_length_3")) score += 30;
   if (patterns.includes("cycle_length_4")) score += 25;
   if (patterns.includes("cycle_length_5")) score += 20;
@@ -155,14 +305,39 @@ function calcSuspicionScore(
   if (patterns.includes("smurfing_source")) score += 10;
   if (patterns.includes("layered_shell")) score += 25;
   if (patterns.includes("low_activity_intermediary")) score += 15;
+  
+  // New pattern scores
+  if (patterns.includes("high_velocity")) score += 18;
+  if (patterns.includes("structuring")) score += 22;
+  if (patterns.includes("round_trip")) score += 20;
+  if (patterns.includes("dormant_activation")) score += 15;
+
+  // Multi-pattern bonus: accounts with diverse fraud signals are more suspicious
+  const patternCount = patterns.length;
+  if (patternCount >= 3) score += 10;
+  if (patternCount >= 5) score += 10;
 
   // Multi-ring involvement
   score += Math.min(ringCount * 5, 15);
+
+  // Flow asymmetry bonus (money mules receive and forward, creating imbalance)
+  if (totalSent > 0 && totalReceived > 0) {
+    const flowRatio = Math.min(totalSent, totalReceived) / Math.max(totalSent, totalReceived);
+    // Pass-through accounts (receive and forward similar amounts) are suspicious
+    if (flowRatio > 0.6 && flowRatio < 0.95 && txCount >= 3) {
+      score += 8;
+    }
+  }
 
   // High-volume merchant filter (reduce score if high tx count with balanced flow)
   if (txCount > 20) {
     const ratio = Math.min(totalSent, totalReceived) / Math.max(totalSent, totalReceived, 1);
     if (ratio > 0.3) score = Math.max(score - 15, 0); // Likely merchant
+  }
+
+  // Payroll filter: consistent outbound-only with many receivers
+  if (totalReceived === 0 && txCount > 10) {
+    score = Math.max(score - 20, 0);
   }
 
   return Math.min(score, 100);
@@ -263,10 +438,63 @@ export function analyzeTransactions(transactions: Transaction[]): AnalysisResult
     }
   }
 
+  // 4. NEW: High-velocity detection
+  const velocityResults = detectHighVelocity(transactions);
+  for (const [acc, pats] of velocityResults) {
+    const existing = accountPatterns.get(acc) || [];
+    for (const p of pats) {
+      if (!existing.includes(p)) existing.push(p);
+    }
+    accountPatterns.set(acc, existing);
+  }
+
+  // 5. NEW: Structuring detection
+  const structuringResults = detectStructuring(transactions);
+  for (const [acc, pats] of structuringResults) {
+    const existing = accountPatterns.get(acc) || [];
+    for (const p of pats) {
+      if (!existing.includes(p)) existing.push(p);
+    }
+    accountPatterns.set(acc, existing);
+  }
+
+  // 6. NEW: Round-trip detection
+  const roundTripResults = detectRoundTrips(transactions);
+  for (const [acc, pats] of roundTripResults) {
+    const existing = accountPatterns.get(acc) || [];
+    for (const p of pats) {
+      if (!existing.includes(p)) existing.push(p);
+    }
+    accountPatterns.set(acc, existing);
+    // Also track in rings
+    if (!accountRings.has(acc)) accountRings.set(acc, []);
+  }
+
+  // 7. NEW: Dormant activation detection
+  const dormantResults = detectDormantActivation(transactions);
+  for (const [acc, pats] of dormantResults) {
+    const existing = accountPatterns.get(acc) || [];
+    for (const p of pats) {
+      if (!existing.includes(p)) existing.push(p);
+    }
+    accountPatterns.set(acc, existing);
+    if (!accountRings.has(acc)) accountRings.set(acc, []);
+  }
+
   // Build suspicious accounts list
   const suspiciousAccounts: SuspiciousAccount[] = [];
-  for (const [acc, rings] of accountRings) {
+  
+  // Include accounts from rings AND accounts flagged by new detectors
+  const allFlaggedAccounts = new Set([
+    ...accountRings.keys(),
+    ...accountPatterns.keys(),
+  ]);
+
+  for (const acc of allFlaggedAccounts) {
+    const rings = accountRings.get(acc) || [];
     const patterns = accountPatterns.get(acc) || [];
+    if (patterns.length === 0) continue;
+    
     const score = calcSuspicionScore(
       acc,
       patterns,
@@ -275,12 +503,12 @@ export function analyzeTransactions(transactions: Transaction[]): AnalysisResult
       sentAmounts.get(acc) || 0,
       recvAmounts.get(acc) || 0
     );
-    if (score >= 20) {
+    if (score >= 15) {
       suspiciousAccounts.push({
         account_id: acc,
         suspicion_score: Math.round(score * 10) / 10,
         detected_patterns: patterns,
-        ring_id: rings[0],
+        ring_id: rings[0] || "STANDALONE",
       });
     }
   }

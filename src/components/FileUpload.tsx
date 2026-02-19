@@ -67,7 +67,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onFileSelect, isProcessing }) =
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <FileText className="w-3 h-3" />
-          <span className="font-mono">Up to 10,000 transactions supported</span>
+          <span className="font-mono">Up to 15,000 transactions supported</span>
         </div>
       </div>
     </motion.div>
