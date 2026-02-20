@@ -6,6 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import FileUpload from "@/components/FileUpload";
 import DashboardStats from "@/components/DashboardStats";
 import PatternBreakdownChart from "@/components/PatternBreakdownChart";
+import RiskScoreHistogram from "@/components/RiskScoreHistogram";
 import TransactionGraph from "@/components/TransactionGraph";
 import FraudRingTable from "@/components/FraudRingTable";
 import SuspiciousAccountsTable from "@/components/SuspiciousAccountsTable";
@@ -237,6 +238,8 @@ const Index = () => {
               </div>
 
               <DashboardStats summary={result.summary} />
+
+              <RiskScoreHistogram accounts={result.suspicious_accounts} />
 
               <PatternBreakdownChart breakdown={result.summary.pattern_breakdown} />
 
