@@ -517,6 +517,59 @@ export function analyzeTransactions(transactions: Transaction[]): AnalysisResult
 
   const endTime = performance.now();
 
+  // Build pattern breakdown: count unique accounts per algorithm group
+  const patternGroups = [
+    {
+      name: "cycle",
+      label: "Circular Routing",
+      patterns: ["cycle_length_3", "cycle_length_4", "cycle_length_5"],
+      color: "hsl(0, 70%, 55%)",
+    },
+    {
+      name: "smurfing",
+      label: "Smurfing",
+      patterns: ["fan_in", "fan_out", "smurfing_source"],
+      color: "hsl(30, 80%, 55%)",
+    },
+    {
+      name: "shell",
+      label: "Shell Network",
+      patterns: ["layered_shell", "low_activity_intermediary"],
+      color: "hsl(270, 60%, 60%)",
+    },
+    {
+      name: "velocity",
+      label: "High Velocity",
+      patterns: ["high_velocity"],
+      color: "hsl(200, 70%, 55%)",
+    },
+    {
+      name: "structuring",
+      label: "Structuring",
+      patterns: ["structuring"],
+      color: "hsl(45, 85%, 55%)",
+    },
+    {
+      name: "round_trip",
+      label: "Round-Trip",
+      patterns: ["round_trip"],
+      color: "hsl(160, 60%, 50%)",
+    },
+    {
+      name: "dormant",
+      label: "Dormant Burst",
+      patterns: ["dormant_activation"],
+      color: "hsl(310, 60%, 60%)",
+    },
+  ];
+
+  const pattern_breakdown = patternGroups.map((group) => {
+    const count = suspiciousAccounts.filter((sa) =>
+      sa.detected_patterns.some((p) => group.patterns.includes(p))
+    ).length;
+    return { name: group.name, label: group.label, count, color: group.color };
+  });
+
   return {
     suspicious_accounts: suspiciousAccounts,
     fraud_rings: fraudRings,
@@ -525,6 +578,7 @@ export function analyzeTransactions(transactions: Transaction[]): AnalysisResult
       suspicious_accounts_flagged: suspiciousAccounts.length,
       fraud_rings_detected: fraudRings.length,
       processing_time_seconds: Math.round((endTime - startTime) / 100) / 10,
+      pattern_breakdown,
     },
   };
 }
