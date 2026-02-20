@@ -20,11 +20,19 @@ export interface FraudRing {
   risk_score: number;
 }
 
+export interface PatternBreakdown {
+  name: string;
+  label: string;
+  count: number;
+  color: string;
+}
+
 export interface AnalysisSummary {
   total_accounts_analyzed: number;
   suspicious_accounts_flagged: number;
   fraud_rings_detected: number;
   processing_time_seconds: number;
+  pattern_breakdown: PatternBreakdown[];
 }
 
 export interface AnalysisResult {

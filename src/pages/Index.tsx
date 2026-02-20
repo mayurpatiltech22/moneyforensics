@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import FileUpload from "@/components/FileUpload";
 import DashboardStats from "@/components/DashboardStats";
+import PatternBreakdownChart from "@/components/PatternBreakdownChart";
 import TransactionGraph from "@/components/TransactionGraph";
 import FraudRingTable from "@/components/FraudRingTable";
 import SuspiciousAccountsTable from "@/components/SuspiciousAccountsTable";
@@ -236,6 +237,8 @@ const Index = () => {
               </div>
 
               <DashboardStats summary={result.summary} />
+
+              <PatternBreakdownChart breakdown={result.summary.pattern_breakdown} />
 
               <Tabs defaultValue="graph" className="w-full">
                 <TabsList className="bg-card border border-border">
